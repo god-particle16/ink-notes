@@ -16,6 +16,7 @@ const lum = h => {
 
 // ---------- state ----------
 const canvas = $('#view'), ctx = canvas.getContext('2d');
+let _cr = null; const CR = () => _cr || (_cr = canvas.getBoundingClientRect());
 const mkPage = (bg = '#ffffff', pattern = 'none') => ({ bg, pattern, strokes: [] });
 let doc = { name: 'Untitled', pages: [mkPage()] };
 let cur = 0;
@@ -33,18 +34,19 @@ let tool = 'pen', prevTool = 'pen', lastInk = 'pen';
 let undoS = [], redoS = [], clip = [];
 let live = null, active = null, fl = null, lassoPath = null, hover = null, spaceDown = false;
 const caches = new Map(); let raf = 0, bgPending = null;
+let liveCv = null, liveN = 0, liveV = null;     // incremental overlay for the stroke being drawn
 const pathCache = new WeakMap();
 const page = () => doc.pages[cur];
 
 // ---------- stroke rendering ----------
-function strokePath(s) {
-  const pts = s.pts, p = new Path2D();
-  const rad = pts.map(q => Math.max(.05, (1 - s.sens) + s.sens * 2 * q[2]) * s.size / 2);
-  for (let i = 0; i < pts.length; i++) {
-    const x = pts[i][0], y = pts[i][1], r = rad[i];
+const radAt = (s, q) => Math.max(.05, (1 - s.sens) + s.sens * 2 * q[2]) * s.size / 2;
+function addSegs(p, s, from, to) {            // append the shapes for points from..to to Path2D p
+  const pts = s.pts;
+  for (let i = Math.max(from, 0); i <= to; i++) {
+    const x = pts[i][0], y = pts[i][1], r = radAt(s, pts[i]);
     p.moveTo(x + r, y); p.arc(x, y, r, 0, Math.PI * 2);
     if (i) {
-      const px = pts[i - 1][0], py = pts[i - 1][1], pr = rad[i - 1];
+      const px = pts[i - 1][0], py = pts[i - 1][1], pr = radAt(s, pts[i - 1]);
       const dx = x - px, dy = y - py, d = Math.hypot(dx, dy);
       if (d > .01) {
         const nx = -dy / d, ny = dx / d;
@@ -56,8 +58,27 @@ function strokePath(s) {
       }
     }
   }
-  return p;
 }
+// Drop points that lie on the line between their neighbours (within 0.2 px of position/width) - same look, far cheaper to draw.
+function simplify(pts, size, sens) {
+  if (pts.length < 3) return pts;
+  const tol = .2, rr = q => Math.max(.05, (1 - sens) + sens * 2 * q[2]) * size / 2;
+  const keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const ax = pts[a][0], ay = pts[a][1], dx = pts[b][0] - ax, dy = pts[b][1] - ay, L2 = dx * dx + dy * dy, ra = rr(pts[a]), rb = rr(pts[b]);
+    let md = 0, mi = -1;
+    for (let i = a + 1; i < b; i++) {
+      let t = L2 ? ((pts[i][0] - ax) * dx + (pts[i][1] - ay) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(pts[i][0] - (ax + dx * t), pts[i][1] - (ay + dy * t), rr(pts[i]) - (ra + (rb - ra) * t));
+      if (d > md) { md = d; mi = i; }
+    }
+    if (md > tol) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+function strokePath(s) { const p = new Path2D(); addSegs(p, s, 0, s.pts.length - 1); return p; }
 function drawStroke(c, s, lightBg, noCache) {
   let path = noCache ? null : pathCache.get(s);
   if (!path) { path = strokePath(s); if (!noCache) pathCache.set(s, path); }
@@ -92,15 +113,26 @@ function renderPage(c, pg, scale, extra) {
   if (extra) extra.forEach(s => drawStroke(c, s, light, true));
   c.restore();
 }
-function buildCache(i) {
-  const c = document.createElement('canvas'); c.width = W * CS; c.height = H * CS;
-  renderPage(c.getContext('2d'), doc.pages[i], CS); caches.set(i, c); return c;
+let cacheT = 0;
+const wantScale = () => { const n = view.s * (devicePixelRatio || 1); return n <= 1 ? 1 : n <= 1.5 ? 1.5 : 2; };
+function buildCache(i, sc) {
+  const c = document.createElement('canvas'); c.width = Math.round(W * sc); c.height = Math.round(H * sc); c.sc = sc;
+  renderPage(c.getContext('2d'), doc.pages[i], sc); caches.set(i, c); return c;
+}
+function getCache(i) {
+  const sc = wantScale(), c = caches.get(i);
+  if (!c) return buildCache(i, sc);
+  if (c.sc !== sc) {   // zoom changed: keep showing the old image, rebuild once zooming stops
+    clearTimeout(cacheT);
+    cacheT = setTimeout(() => { for (const [k, v] of [...caches]) if (v.sc !== wantScale()) caches.delete(k); need(); }, 200);
+  }
+  return c;
 }
 const dirtyCache = i => { caches.delete(i === undefined ? cur : i); need(); };
 const dirtyAll = () => { caches.clear(); need(); };
 function paintToCache(s) {
   const c = caches.get(cur); if (!c) return;
-  const g = c.getContext('2d'); g.save(); g.scale(CS, CS); drawStroke(g, s, lum(page().bg) >= .5); g.restore();
+  const g = c.getContext('2d'); g.save(); g.scale(c.sc, c.sc); drawStroke(g, s, lum(page().bg) >= .5); g.restore();
 }
 
 // ---------- history ----------
@@ -116,7 +148,11 @@ function redo() { closePops(); commitFloat(); if (!redoS.length) return; undoS.p
 let saveT = 0;
 function changed() {
   $('#bUndo').style.opacity = undoS.length ? 1 : .35; $('#bRedo').style.opacity = redoS.length ? 1 : .35;
-  clearTimeout(saveT); saveT = setTimeout(() => window.api.autosave(JSON.stringify(serial())), 1500);
+  clearTimeout(saveT);
+  saveT = setTimeout(() => {
+    const run = () => window.api.autosave(JSON.stringify(serial()));
+    window.requestIdleCallback ? requestIdleCallback(run, { timeout: 4000 }) : run();
+  }, 3000);
   need();
 }
 
@@ -253,12 +289,12 @@ $('#bgAll').onclick = () => {
 
 // ---------- view ----------
 function resize() {
-  const r = canvas.getBoundingClientRect(), d = devicePixelRatio || 1;
+  _cr = null; const r = CR(), d = devicePixelRatio || 1;
   canvas.width = Math.round(r.width * d); canvas.height = Math.round(r.height * d); need();
 }
 new ResizeObserver(resize).observe(canvas);
 function fit(keepPage) {
-  const r = canvas.getBoundingClientRect(), vp = keepPage ? visiblePage() : 0;
+  const r = CR(), vp = keepPage ? visiblePage() : 0;
   view.s = Math.max(.2, (r.width - 150) / W);
   view.x = (r.width - W * view.s) / 2 + 40; view.y = 20 - vp * PH * view.s; pageUI(); need();
 }
@@ -266,15 +302,15 @@ function zoomAt(f, cx, cy) {
   const ns = clamp(view.s * f, .1, 8);
   view.x = cx - (cx - view.x) * ns / view.s; view.y = cy - (cy - view.y) * ns / view.s; view.s = ns; pageUI(); need();
 }
-function zoomCenter(f) { const r = canvas.getBoundingClientRect(); zoomAt(f, r.width / 2, r.height / 2); }
-const world = e => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left - view.x) / view.s, y: (e.clientY - r.top - view.y) / view.s }; };
+function zoomCenter(f) { const r = CR(); zoomAt(f, r.width / 2, r.height / 2); }
+const world = e => { const r = CR(); return { x: (e.clientX - r.left - view.x) / view.s, y: (e.clientY - r.top - view.y) / view.s }; };
 const pt = e => { const w = world(e); return { x: w.x, y: w.y - cur * PH }; };   // coordinates local to the current page
 const pageAtY = y => clamp(Math.floor((y + GAP / 2) / PH), 0, doc.pages.length - 1);
-const visiblePage = () => pageAtY((canvas.getBoundingClientRect().height / 2 - view.y) / view.s);
+const visiblePage = () => pageAtY((CR().height / 2 - view.y) / view.s);
 const prs = e => e.pointerType === 'pen' ? Math.max(e.pressure, .02) : .5;
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
-  if (e.ctrlKey) { const r = canvas.getBoundingClientRect(); zoomAt(Math.exp(-e.deltaY * .0015), e.clientX - r.left, e.clientY - r.top); }
+  if (e.ctrlKey) { const r = CR(); zoomAt(Math.exp(-e.deltaY * .0015), e.clientX - r.left, e.clientY - r.top); }
   else { view.x -= e.shiftKey ? e.deltaY : e.deltaX; view.y -= e.shiftKey ? 0 : e.deltaY; need(); }
 }, { passive: false });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
@@ -295,6 +331,7 @@ canvas.addEventListener('pointerdown', e => {
   if (INK(t)) {
     commitFloat(); const ts = TS[t];
     live = { tool: t, color: ts.color, size: ts.size, opacity: ts.opacity, sens: TOOLDEF[t].sens * S.pressure, pts: [[p.x, p.y, prs(e)]] };
+    liveN = 0; liveV = null;
     active = { id: e.pointerId, kind: 'ink', last: [p.x, p.y], et: t };
   } else if (t === 'eraser' || t === 'strokeEraser') {
     commitFloat(); active = { id: e.pointerId, kind: 'erase', et: t, snap: snap(), changed: false, last: p }; eraseStep(p, p);
@@ -315,7 +352,7 @@ canvas.addEventListener('pointerdown', e => {
   need();
 });
 canvas.addEventListener('pointermove', e => {
-  const r = canvas.getBoundingClientRect(); hover = { x: e.clientX - r.left, y: e.clientY - r.top };
+  const r = CR(); hover = { x: e.clientX - r.left, y: e.clientY - r.top };
   if (active && e.pointerId === active.id) {
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     (evs.length ? evs : [e]).forEach(step);
@@ -346,6 +383,7 @@ function endPointer(e) {
     const s = live; live = null;
     const p = pt(e), lp = s.pts[s.pts.length - 1];
     if (Math.hypot(p.x - lp[0], p.y - lp[1]) > .8) s.pts.push([p.x, p.y, lp[2]]);
+    s.pts = simplify(s.pts, s.size, s.sens).map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10, Math.round(q[2] * 100) / 100]);
     pushUndo(); page().strokes = [...page().strokes, s]; paintToCache(s); changed();
   } else if (a.kind === 'erase') { if (a.changed) { pushSnap(a.snap); changed(); } }
   else if (a.kind === 'lasso') finishLasso(lassoPath || []);
@@ -354,30 +392,71 @@ function endPointer(e) {
 canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 
+const bbox = new WeakMap();
+function bboxOf(s) {
+  let b = bbox.get(s); if (b) return b;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const q of s.pts) { if (q[0] < x0) x0 = q[0]; if (q[0] > x1) x1 = q[0]; if (q[1] < y0) y0 = q[1]; if (q[1] > y1) y1 = q[1]; }
+  b = [x0, y0, x1, y1]; bbox.set(s, b); return b;
+}
+function patchCache(x0, y0, x1, y1) {   // re-render just a small rectangle of the current page image
+  const c = caches.get(cur); if (!c) return;
+  const sc = c.sc, pg = page();
+  x0 = Math.max(0, Math.floor(x0 * sc) / sc); y0 = Math.max(0, Math.floor(y0 * sc) / sc);
+  x1 = Math.min(W, Math.ceil(x1 * sc) / sc); y1 = Math.min(H, Math.ceil(y1 * sc) / sc);
+  if (x1 <= x0 || y1 <= y0) return;
+  const g = c.getContext('2d'), light = lum(pg.bg) >= .5;
+  g.save(); g.scale(sc, sc); g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip();
+  g.fillStyle = pg.bg; g.fillRect(x0, y0, x1 - x0, y1 - y0); drawPattern(g, pg);
+  for (const s of pg.strokes) {
+    const b = bboxOf(s), m = s.size;
+    if (b[0] - m > x1 || b[2] + m < x0 || b[1] - m > y1 || b[3] + m < y0) continue;
+    drawStroke(g, s, light);
+  }
+  g.restore();
+}
 function eraseStep(a, b) {
   const t = active.et, r = TS[t].size / 2;
   const d = Math.hypot(b.x - a.x, b.y - a.y), n = Math.max(1, Math.ceil(d / (r / 2))), qs = [];
   for (let i = 0; i <= n; i++) qs.push([a.x + (b.x - a.x) * i / n, a.y + (b.y - a.y) * i / n]);
   const near = (x, y) => qs.some(q => (q[0] - x) ** 2 + (q[1] - y) ** 2 <= r * r);
-  const next = []; let ch = false;
+  const next = []; let ch = false, pad = 0;
+  const sx0 = Math.min(a.x, b.x) - r, sx1 = Math.max(a.x, b.x) + r, sy0 = Math.min(a.y, b.y) - r, sy1 = Math.max(a.y, b.y) + r;
   for (const s of page().strokes) {
+    const bb = bboxOf(s);
+    if (bb[0] - s.size > sx1 || bb[2] + s.size < sx0 || bb[1] - s.size > sy1 || bb[3] + s.size < sy0) { next.push(s); continue; }
     const flags = s.pts.map(q => near(q[0], q[1]));
     if (!flags.some(Boolean)) { next.push(s); continue; }
-    ch = true; if (t === 'strokeEraser') continue;
+    ch = true; pad = Math.max(pad, s.size); if (t === 'strokeEraser') continue;
     let run = [];
     for (let i = 0; i < s.pts.length; i++) {
       if (flags[i]) { if (run.length) next.push({ ...s, pts: run }); run = []; } else run.push(s.pts[i]);
     }
     if (run.length) next.push({ ...s, pts: run });
   }
-  if (ch) { page().strokes = next; active.changed = true; dirtyCache(); }
+  if (ch) { page().strokes = next; active.changed = true; patchCache(sx0 - pad - 2, sy0 - pad - 2, sx1 + pad + 2, sy1 + pad + 2); need(); }
 }
 
 // ---------- drawing the view ----------
 const need = () => { if (!raf) raf = requestAnimationFrame(draw); };
 function clampView() {
-  const r = canvas.getBoundingClientRect(), total = (doc.pages.length * PH - GAP) * view.s;
+  const r = CR(), total = (doc.pages.length * PH - GAP) * view.s;
   view.y = clamp(view.y, Math.min(60, r.height - total - 60), 60);
+}
+function paintLive(d) {   // paint only the newly added part of the stroke being drawn
+  if (!live) return;
+  if (!liveCv || liveCv.width !== canvas.width || liveCv.height !== canvas.height) {
+    liveCv = document.createElement('canvas'); liveCv.width = canvas.width; liveCv.height = canvas.height; liveV = null;
+  }
+  const g = liveCv.getContext('2d');
+  if (!liveV || liveV.x !== view.x || liveV.y !== view.y || liveV.s !== view.s || liveV.cur !== cur) {
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, liveCv.width, liveCv.height);
+    liveN = 0; liveV = { x: view.x, y: view.y, s: view.s, cur };
+  }
+  if (liveN >= live.pts.length) return;
+  const p = new Path2D(); addSegs(p, live, liveN, live.pts.length - 1);
+  g.setTransform(d * view.s, 0, 0, d * view.s, d * view.x, d * (view.y + cur * PH * view.s));
+  g.fillStyle = live.color; g.fill(p); liveN = live.pts.length;
 }
 function draw() {
   raf = 0; clampView();
@@ -385,18 +464,25 @@ function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = '#2a2c31'; ctx.fillRect(0, 0, canvas.width, canvas.height);
   const vis = [];
   doc.pages.forEach((_, i) => { const top = view.y + i * PH * view.s; if (top < ch && top + H * view.s > 0) vis.push(i); });
-  for (const k of [...caches.keys()]) if (!vis.includes(k)) caches.delete(k);
+  const keep = new Set(); vis.forEach(i => { keep.add(i - 1); keep.add(i); keep.add(i + 1); });
+  for (const k of [...caches.keys()]) if (!keep.has(k)) caches.delete(k);
   for (const i of vis) {
     const pg = doc.pages[i], light = lum(pg.bg) >= .5;
     ctx.setTransform(d * view.s, 0, 0, d * view.s, d * view.x, d * (view.y + i * PH * view.s));
-    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 30; ctx.fillStyle = pg.bg; ctx.fillRect(0, 0, W, H); ctx.restore();
-    let c = caches.get(i); if (!c && vis.length <= 4) c = buildCache(i);
+    ctx.fillStyle = 'rgba(0,0,0,.16)'; ctx.fillRect(-4 * px, -2 * px, W + 8 * px, H + 10 * px);   // cheap drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,.10)'; ctx.fillRect(-9 * px, -5 * px, W + 18 * px, H + 22 * px);
+    const c = vis.length <= 4 ? getCache(i) : (caches.get(i) || null);
     ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
-    if (c) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; ctx.drawImage(c, 0, 0, W, H); }
+    if (c) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'medium'; ctx.drawImage(c, 0, 0, W, H); }
     else renderPage(ctx, pg, 1);
     if (i === cur) {
       if (fl) fl.strokes.forEach(s => drawStroke(ctx, xf(s, fl), light, true));
-      if (live) drawStroke(ctx, live, light, true);
+      if (live) {
+        paintLive(d);
+        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = live.opacity;
+        if (TOOLDEF[live.tool].multiply && light) ctx.globalCompositeOperation = 'multiply';
+        ctx.drawImage(liveCv, 0, 0); ctx.restore();
+      }
     }
     ctx.restore();
     if (i === cur) {
@@ -422,11 +508,12 @@ function draw() {
 }
 
 // ---------- pages ----------
-let lastPUI = '';
+let lastPUI = '', lastZ = '';
 function pageUI() {
   const t = `Page ${visiblePage() + 1} / ${doc.pages.length}`;
   if (t !== lastPUI) { lastPUI = t; $('#pageInfo').textContent = t; }
-  $('#zoomInfo').textContent = Math.round(view.s / Math.max(.2, (canvas.getBoundingClientRect().width - 150) / W) * 100) + '%';
+  const z = Math.round(view.s / Math.max(.2, (CR().width - 150) / W) * 100) + '%';
+  if (z !== lastZ) { lastZ = z; $('#zoomInfo').textContent = z; }
 }
 function goPage(i) { commitFloat(); cur = clamp(i, 0, doc.pages.length - 1); view.y = 20 - cur * PH * view.s; pageUI(); need(); }
 function addPage() {
