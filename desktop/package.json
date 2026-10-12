@@ -1,0 +1,33 @@
+{
+  "name": "inknotes",
+  "version": "1.0.0",
+  "description": "Handwritten notes for pen tablets (Huion, Wacom, XP-Pen, Surface)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.0.0",
+    "@electron/packager": "^20.3.0"
+  },
+  "build": {
+    "appId": "com.inknotes.app",
+    "productName": "InkNotes",
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "style.css",
+      "renderer.js",
+      "package.json"
+    ]
+  }
+}
