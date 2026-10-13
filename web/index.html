@@ -10,13 +10,42 @@
 <link rel="icon" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body data-view="home">
+<div id="home">
+  <header class="hbar">
+    <div class="brand"><img src="icon-192.png" alt="" width="34" height="34"><h1>InkNotes</h1></div>
+    <div class="hsearch">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="search" type="search" placeholder="Search notes" aria-label="Search notes" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="hact">
+      <select id="sort" aria-label="Sort notes">
+        <option value="edited">Last edited</option>
+        <option value="created">Newest first</option>
+        <option value="name">Name A–Z</option>
+      </select>
+      <button class="tx" id="hImport" title="Add a note from a .inknote backup file">Import</button>
+      <button class="tx primary" id="hNew">+ New note</button>
+    </div>
+  </header>
+  <main class="hmain">
+    <div class="hhead"><h2>My notes</h2><span id="count"></span></div>
+    <div id="grid"></div>
+    <p id="msg" hidden></p>
+    <p class="foot">Notes save automatically inside this browser. Use <b>⋯ → Export file</b> to keep a backup copy.</p>
+  </main>
+</div>
+
 <div id="app">
   <header id="top">
+    <div class="grp left">
+      <button class="tx" id="bHome" title="Back to all notes"><b>‹</b> Notes</button>
+      <input id="noteName" class="title" maxlength="80" placeholder="Untitled" spellcheck="false" autocomplete="off" aria-label="Note title">
+    </div>
     <div class="grp filebtns">
       <button class="tx" id="bNew" title="New note">New</button>
-      <button class="tx" id="bOpen" title="Open note">Open</button>
-      <button class="tx" id="bSave" title="Save note">Save</button>
+      <button class="tx" id="bOpen" title="Add a note from a .inknote backup file">Import</button>
+      <button class="tx" id="bSave" title="Download a .inknote backup file (notes also save automatically)">Backup</button>
       <button class="tx" id="bPdf" title="Export all pages as PDF">PDF</button>
       <button class="tx" id="bPng" title="Export current page as PNG">PNG</button>
     </div>
@@ -24,9 +53,9 @@
     <div class="wrap fileMenu">
       <button class="tx" id="bFile" title="File menu">File ▾</button>
       <div class="pop left" id="filePop">
-        <button class="mi" data-act="new">New note</button>
-        <button class="mi" data-act="open">Open…</button>
-        <button class="mi" data-act="save">Save…</button>
+        <button class="mi" data-act="new">New note…</button>
+        <button class="mi" data-act="open">Import note file…</button>
+        <button class="mi" data-act="save">Download backup file</button>
         <button class="mi" data-act="pdf">Export as PDF</button>
         <button class="mi" data-act="png">Export page as PNG</button>
       </div>
@@ -91,6 +120,7 @@
     <button class="tx sm" id="pAdd">+ Page</button>
     <button class="tx sm" id="pDel">Delete page</button>
     <span class="grow"></span>
+    <span id="saveState" role="status"></span>
     <button class="tx sm" id="zFit" title="Fit page">Fit</button>
     <span id="zoomInfo">100%</span>
   </footer>
@@ -109,8 +139,18 @@
     </div>
   </div>
 </div>
+<div id="dlg" hidden role="dialog" aria-modal="true" aria-labelledby="dTitle">
+  <div class="dcard">
+    <h2 id="dTitle"></h2>
+    <div class="dbody"></div>
+    <div class="dfoot"><button class="tx" id="dCancel">Cancel</button><button class="tx primary" id="dOk">OK</button></div>
+  </div>
+</div>
+<div id="menu" hidden role="menu"></div>
+<div id="gtoast" role="status"></div>
 <script src="pdf.js"></script>
 <script src="web-api.js"></script>
 <script src="renderer.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

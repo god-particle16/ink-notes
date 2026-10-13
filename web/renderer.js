@@ -90,17 +90,17 @@ function drawStroke(c, s, lightBg, noCache) {
 }
 function drawPattern(c, p) {
   if (p.pattern === 'none') return;
-  const dark = lum(p.bg) < .5, g = 48;
+  const dark = lum(p.bg) < .5, g = 48, k = p.boost || 1;   // boost: thicker marks for small thumbnails
   c.save();
   c.strokeStyle = c.fillStyle = dark ? 'rgba(255,255,255,.14)' : 'rgba(40,70,120,.22)';
-  c.lineWidth = 1.5;
+  c.lineWidth = 1.5 * k;
   if (p.pattern === 'lines') {
     for (let y = g * 2; y < H; y += g) { c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
   } else if (p.pattern === 'grid') {
     for (let y = g; y < H; y += g) { c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke(); }
     for (let x = g; x < W; x += g) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke(); }
   } else if (p.pattern === 'dots') {
-    for (let y = g; y < H; y += g) for (let x = g; x < W; x += g) c.fillRect(x - 1.5, y - 1.5, 3, 3);
+    for (let y = g; y < H; y += g) for (let x = g; x < W; x += g) c.fillRect(x - 1.5 * k, y - 1.5 * k, 3 * k, 3 * k);
   }
   c.restore();
 }
@@ -146,13 +146,15 @@ function restore(s) {
 function undo() { closePops(); commitFloat(); if (!undoS.length) return; redoS.push(snap()); restore(undoS.pop()); changed(); }
 function redo() { closePops(); commitFloat(); if (!redoS.length) return; undoS.push(snap()); restore(redoS.pop()); changed(); }
 let saveT = 0;
-function changed() {
-  $('#bUndo').style.opacity = undoS.length ? 1 : .35; $('#bRedo').style.opacity = redoS.length ? 1 : .35;
+function uiState() { $('#bUndo').style.opacity = undoS.length ? 1 : .35; $('#bRedo').style.opacity = redoS.length ? 1 : .35; }
+function changed() {            // a real edit happened: tell the notes library and schedule an autosave
+  uiState();
+  if (window.InkApp) InkApp.dirty();
   clearTimeout(saveT);
   saveT = setTimeout(() => {
-    const run = () => window.api.autosave(JSON.stringify(serial()));
+    const run = () => { if (window.InkApp) InkApp.save(); };
     window.requestIdleCallback ? requestIdleCallback(run, { timeout: 4000 }) : run();
-  }, 3000);
+  }, 2500);
   need();
 }
 
@@ -537,18 +539,11 @@ function serial() {
 function loadDoc(d, name) {
   if (!d || !Array.isArray(d.pages) || !d.pages.length) throw new Error('bad file');
   doc = { name: name || d.name || 'Untitled', pages: d.pages.map(p => ({ bg: p.bg || '#ffffff', pattern: p.pattern || 'none', strokes: p.strokes || [] })) };
-  cur = 0; undoS = []; redoS = []; fl = null; live = null; dirtyAll(); fit(false); changed();
+  cur = 0; undoS = []; redoS = []; fl = null; live = null; dirtyAll(); fit(false); uiState(); need();
 }
-async function newNote() {
-  commitFloat();
-  if (doc.pages.some(p => p.strokes.length) && !confirm('Start a new note? Unsaved changes will be lost.')) return;
-  loadDoc({ pages: [mkPage(page().bg, page().pattern)] }, 'Untitled');
-}
-async function saveNote() { commitFloat(); const n = await window.api.saveNote(JSON.stringify(serial()), doc.name); if (n) { doc.name = n; toast('Saved'); } }
-async function openNote() {
-  const r = await window.api.openNote(); if (!r) return;
-  try { loadDoc(JSON.parse(r.text), r.name); toast('Opened ' + r.name); } catch (e) { toast('That file is not a valid InkNotes note'); }
-}
+async function newNote() { commitFloat(); if (window.InkApp) InkApp.newDialog(); }
+async function saveNote() { commitFloat(); const n = await window.api.saveNote(JSON.stringify(serial()), doc.name); if (n) toast('Backup file saved'); }
+async function openNote() { if (window.InkApp) InkApp.importFiles(true); }
 function pageCanvas(pg, scale) { const c = document.createElement('canvas'); c.width = W * scale; c.height = H * scale; renderPage(c.getContext('2d'), pg, scale); return c; }
 async function exportPdf() {
   commitFloat(); toast('Exporting PDF…');
@@ -578,7 +573,7 @@ const ACTIONS = [
   ['newPage', 'Add page', 'ctrl+enter', addPage], ['delPage', 'Delete page', 'alt+delete', delPage],
   ['copy', 'Copy selection', 'ctrl+c', () => { copyFloat(); toast('Copied'); }], ['paste', 'Paste', 'ctrl+v', pasteClip],
   ['dup', 'Duplicate selection', 'ctrl+d', () => { copyFloat(); pasteClip(); }], ['del', 'Delete selection', 'delete', deleteFloat],
-  ['new', 'New note', 'ctrl+alt+n', newNote], ['open', 'Open note', 'ctrl+o', openNote], ['save', 'Save note', 'ctrl+s', saveNote],
+  ['new', 'New note', 'ctrl+alt+n', newNote], ['open', 'Import note file', 'ctrl+o', openNote], ['save', 'Backup file', 'ctrl+s', saveNote],
   ['pdf', 'Export PDF', 'ctrl+e', exportPdf], ['png', 'Export PNG', 'ctrl+shift+e', exportPng],
   ['fit', 'Fit page', 'ctrl+0', () => fit(true)], ['zoomIn', 'Zoom in', 'ctrl+=', () => zoomCenter(1.25)], ['zoomOut', 'Zoom out', 'ctrl+-', () => zoomCenter(.8)],
   ['settings', 'Settings', 'ctrl+,', () => openModal()]
@@ -593,6 +588,7 @@ function combo(e) {
 const pretty = c => c ? c.split('+').map(x => x.length > 1 ? x[0].toUpperCase() + x.slice(1) : x.toUpperCase()).join(' + ') : 'Not set';
 let capturing = null;
 document.addEventListener('keydown', e => {
+  if (document.body.dataset.view === 'home') return;
   if (capturing) {
     e.preventDefault(); if (e.key === 'Escape') { capturing = null; buildKeyList(); return; }
     const c = combo(e); if (!c) return;
@@ -645,7 +641,19 @@ document.querySelectorAll('.mi').forEach(b => b.onclick = () => {
 // ---------- boot ----------
 (async () => {
   document.querySelector('[data-tool="pen"]').classList.add('on');
-  canvas.style.cursor = 'none'; syncUI(); resize(); fit(); changed();
-  try { const t = await window.api.loadAutosave(); if (t) loadDoc(JSON.parse(t)); } catch (e) {}
+  canvas.style.cursor = 'none'; syncUI(); resize(); fit(); uiState();
 })();
+
+// ---------- API used by the notes home page (app.js) ----------
+const thumbOf = d => {
+  const p = d.pages[0];
+  return pageCanvas({ bg: p.bg || '#ffffff', pattern: p.pattern || 'none', strokes: p.strokes || [], boost: 3 }, .24).toDataURL('image/jpeg', .82);
+};
+window.InkEditor = {
+  open(d) { resize(); loadDoc(d, d.name); },          // show a note (editor must be visible first)
+  serial() { return serial(); },
+  thumb() { return thumbOf(serial()); },
+  thumbOf,
+  setName(n) { doc.name = n; changed(); }
+};
 })();
