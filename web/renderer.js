@@ -295,10 +295,12 @@ function resize() {
   canvas.width = Math.round(r.width * d); canvas.height = Math.round(r.height * d); need();
 }
 new ResizeObserver(resize).observe(canvas);
+const narrow = () => CR().width < 700;                     // phones: the size/opacity sliders sit along the bottom, not the left
+const fitScale = () => Math.max(.2, (CR().width - (narrow() ? 16 : 150)) / W);
 function fit(keepPage) {
   const r = CR(), vp = keepPage ? visiblePage() : 0;
-  view.s = Math.max(.2, (r.width - 150) / W);
-  view.x = (r.width - W * view.s) / 2 + 40; view.y = 20 - vp * PH * view.s; pageUI(); need();
+  view.s = fitScale();
+  view.x = (r.width - W * view.s) / 2 + (narrow() ? 0 : 40); view.y = 20 - vp * PH * view.s; pageUI(); need();
 }
 function zoomAt(f, cx, cy) {
   const ns = clamp(view.s * f, .1, 8);
@@ -514,7 +516,7 @@ let lastPUI = '', lastZ = '';
 function pageUI() {
   const t = `Page ${visiblePage() + 1} / ${doc.pages.length}`;
   if (t !== lastPUI) { lastPUI = t; $('#pageInfo').textContent = t; }
-  const z = Math.round(view.s / Math.max(.2, (CR().width - 150) / W) * 100) + '%';
+  const z = Math.round(view.s / fitScale() * 100) + '%';
   if (z !== lastZ) { lastZ = z; $('#zoomInfo').textContent = z; }
 }
 function goPage(i) { commitFloat(); cur = clamp(i, 0, doc.pages.length - 1); view.y = 20 - cur * PH * view.s; pageUI(); need(); }
@@ -588,7 +590,7 @@ function combo(e) {
 const pretty = c => c ? c.split('+').map(x => x.length > 1 ? x[0].toUpperCase() + x.slice(1) : x.toUpperCase()).join(' + ') : 'Not set';
 let capturing = null;
 document.addEventListener('keydown', e => {
-  if (document.body.dataset.view === 'home') return;
+  if (document.body.dataset.view !== 'editor') return;
   if (capturing) {
     e.preventDefault(); if (e.key === 'Escape') { capturing = null; buildKeyList(); return; }
     const c = combo(e); if (!c) return;

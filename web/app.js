@@ -181,7 +181,7 @@ function newTile() {
 function card(m) {
   const c = el('div', 'nc'); c.tabIndex = 0; c.setAttribute('role', 'button'); c.dataset.id = m.id; c.setAttribute('aria-label', 'Open ' + m.name);
   const th = el('div', 'th'); th.style.background = m.bg || '#fff';
-  if (m.thumb) { const im = new Image(); im.alt = ''; im.src = m.thumb; im.draggable = false; th.appendChild(im); }
+  if (m.thumb) { const im = new Image(); im.alt = ''; im.decoding = 'async'; im.src = m.thumb; im.draggable = false; th.appendChild(im); }
   const mb = el('button', 'more', '⋯'); mb.type = 'button'; mb.title = 'Note options'; mb.setAttribute('aria-label', 'Options for ' + m.name); mb.setAttribute('aria-haspopup', 'menu');
   th.appendChild(mb);
   const cap = el('div', 'ncap');
@@ -272,12 +272,18 @@ async function openNote(id) {
 }
 async function showHome() {
   ++opening; await save(); current = null;
-  document.body.dataset.view = 'home'; document.title = 'InkNotes';
+  document.body.dataset.view = 'home'; document.title = 'My notes – InkNotes'; closeMenu();
+  await ready;                                         // old single-note autosave is migrated first
   await renderHome();
+}
+async function showLanding() {
+  ++opening; await save(); current = null; closeMenu();
+  if (document.body.dataset.view !== 'landing') { document.body.dataset.view = 'landing'; $('#landing').scrollTop = 0; }
+  document.title = 'InkNotes – Handwritten notes for pen tablets';
 }
 function route() {
   const m = /^#\/note\/([\w-]+)/.exec(location.hash);
-  if (m) openNote(m[1]); else showHome();
+  if (m) openNote(m[1]); else if (location.hash === '#/') showHome(); else showLanding();
 }
 $('#bHome').onclick = () => { location.hash = '#/'; };
 $('#noteName').addEventListener('input', e => {
@@ -291,5 +297,7 @@ addEventListener('pagehide', () => save());
 addEventListener('hashchange', route);
 
 window.InkApp = { dirty, save, newDialog, importFiles };
-(async () => { try { await migrateLegacy(); } catch (e) {} route(); })();
+// the landing page needs no storage, so the old-data migration waits until the browser is idle
+const ready = new Promise(res => (window.requestIdleCallback || setTimeout)(() => migrateLegacy().catch(() => {}).then(res)));
+route();
 })();
